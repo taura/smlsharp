@@ -227,6 +227,7 @@ precompiled/$(PRECOMPILED_ARCH).bc: precompiled/$(PRECOMPILED_ARCH).ll.xz
 precompiled/$(PRECOMPILED_ARCH).$(OBJEXT): $(LLVM_PLUGIN) \
                                            precompiled/$(PRECOMPILED_ARCH).bc
 	$(LLC) -load=$(LLVM_PLUGIN) -mtriple=$(TARGET_TRIPLE) -O2 \
+	-relocation-model=pic \
 	-tailcallopt -filetype=obj -o $@ precompiled/$(PRECOMPILED_ARCH).bc
 
 ./minismlsharp: $(RUNTIME_TARGETS) $(COMPILER_SUPPORT_OBJECTS) \
