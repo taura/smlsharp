@@ -13,6 +13,7 @@ fun make_tasks n 0 = 0
 	(Myth.Thread.join tx) + y
     end
 
+(* measure rep times "make m tasks each counting up to n" *)
 fun do_it n m 0 = 0
   | do_it n m rep = 
     let
@@ -44,4 +45,7 @@ fun main args =
       do_it n m r
   end
 
+(* usage:
+   MYTH_NUM_WORKERS=M_TASKS ./trivial N_CONS_CELLS_PER_TASK M_TASKS REPEAT_TIMES
+ *)
 val _ = main (CommandLine.arguments())
