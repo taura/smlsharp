@@ -2777,23 +2777,23 @@ static void sml_alloc_time_recorder_dump() {
     FILE * wp = fopen(filename, "wb");
     for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
          r; r = r->next) {
+      printf("idx: %ld, n: %ld, dt: %ld, avg: %f\n",
+	     r->idx, r->n, r->dt, (double)r->dt / (double)r->n);
+#if 0
       size_t nw = fwrite((void *)r->a,
 			 sizeof(sml_alloc_time_record_t), r->n, wp);
       assert(nw == r->n);
+#endif
     }
     fclose(wp);
   }
 }
 
 static void sml_alloc_time_recorder_reset() {
-  volatile sml_alloc_time_recorder_t * next = 0;
   for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
-       r; r = next) {
-    next = r->next;
-    free(r->a);
-    free((void *)r);
+       r; r = r->next) {
+    r->n = 0;
   }
-  sml_alloc_time_recorders_list = 0;
 }
 
 static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
@@ -2816,7 +2816,6 @@ static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
     r = sml_alloc_time_recorder_alloc(idx);
     pthread_setspecific(sml_alloc_time_record_key, r);
   }
-  assert(r->n < r->capacity);
   return r;
 }
 
@@ -2833,14 +2832,20 @@ SML_PRIMITIVE void sml_reset_alloc_time(void) {
   sml_alloc_time_recorder_reset();
 }
 
+tsc_t get_ns() {
+  struct timespec ts[1];
+  clock_gettime(CLOCK_REALTIME, ts);
+  return ts->tv_sec * 1000000000 + ts->tv_nsec;
+}
+
 SML_PRIMITIVE void *
 sml_alloc(unsigned int objsize)
 {
   char * filename = sml_get_alloc_dump_filename();
   if (filename) {
-    tsc_t t0 = _rdtsc();
+    tsc_t t0 = get_ns();
     void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
-    tsc_t t1 = _rdtsc();
+    tsc_t t1 = get_ns();
     sml_record_alloc_time(objsize, t0, t1);
     return obj;
   } else {
