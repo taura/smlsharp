@@ -45,7 +45,7 @@ fun main args =
       print ("conses=" ^ (Int.toString n) ^ "\n");
       print ("tasks="  ^ (Int.toString m) ^ "\n");
       print ("repeat=" ^ (Int.toString r) ^ "\n");
-      do_it n m r
+      do_it n m r;
       sml_dump_alloc_time ()
   end
 

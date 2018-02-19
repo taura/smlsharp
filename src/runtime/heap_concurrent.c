@@ -2759,7 +2759,8 @@ static void sml_alloc_time_recorder_dump() {
     FILE * wp = fopen(filename, "wb");
     for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
          r; r = r->next) {
-      size_t nw = fwrite(&r->a, sizeof(sml_alloc_time_record_t), r->n, wp);
+      size_t nw = fwrite((void *)&r->a,
+			 sizeof(sml_alloc_time_record_t), r->n, wp);
       assert(nw == r->n);
     }
     fclose(wp);
@@ -2786,7 +2787,7 @@ static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
   } else {
     idx = (long)pthread_getspecific(sml_thread_idx_key);
   }
-  if (!r || r->n == r->sz) {
+  if (!r || r->n == r->capacity) {
     r = sml_alloc_time_recorder_alloc(idx);
     pthread_setspecific(sml_alloc_time_record_key, r);
   }
@@ -2795,7 +2796,7 @@ static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
 
 static void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1) {
   sml_alloc_time_recorder_t * r = sml_alloc_time_getspecific();
-  sml_alloc_time_recorder_record(r, sz, t0, t1);
+  sml_alloc_time_recorder_record(r, sz, t0, t1, r->idx);
 }
 
 SML_PRIMITIVE void sml_dump_alloc_time(void) {
