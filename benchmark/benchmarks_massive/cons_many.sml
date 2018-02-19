@@ -14,16 +14,18 @@ fun make_tasks n 0 = 0
     end
 
 val sml_dump_alloc_time = _import "sml_dump_alloc_time" : () -> ()
+val sml_reset_alloc_time = _import "sml_reset_alloc_time" : () -> ()
 
 (* measure rep times "make m tasks each making n cons cells" *)
 fun do_it n m 0 = 0
   | do_it n m rep = 
     let
+	val _ = sml_reset_alloc_time ()
 	val t0 = Time.now ()
 	val x = make_tasks ((n + m - 1) div m) m
 	val t1 = Time.now ()
+	val _ = (print (Time.fmt 6 (Time.- (t1, t0))); print "\n")
     in
-	print (Time.fmt 6 (Time.- (t1, t0))); print "\n";
 	do_it n m (rep - 1)
     end
     
