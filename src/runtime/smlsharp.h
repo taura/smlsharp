@@ -496,6 +496,9 @@ SML_PRIMITIVE void *sml_unsave_exn(void *);
  * SML# heap object management
  */
 SML_PRIMITIVE void *sml_alloc(unsigned int objsize);
+#if TAU_PROF
+SML_PRIMITIVE void *sml_alloc_x(unsigned int objsize);
+#endif
 SML_PRIMITIVE void *sml_load_intinf(const char *hexsrc);
 SML_PRIMITIVE void **sml_find_callback(void *codeaddr, void *env);
 SML_PRIMITIVE void *sml_alloc_code(void);

@@ -13,6 +13,8 @@ fun make_tasks n 0 = 0
 	(Myth.Thread.join tx) + y
     end
 
+val sml_dump_alloc_time = _import "sml_dump_alloc_time" : () -> ()
+
 (* measure rep times "make m tasks each making n cons cells" *)
 fun do_it n m 0 = 0
   | do_it n m rep = 
@@ -44,6 +46,7 @@ fun main args =
       print ("tasks="  ^ (Int.toString m) ^ "\n");
       print ("repeat=" ^ (Int.toString r) ^ "\n");
       do_it n m r
+      sml_dump_alloc_time ()
   end
 
 (* usage:
