@@ -2605,6 +2605,7 @@ malloc_object(size_t alloc_size)
 	return MALLOC_SEGMENT_TO_OBJ(mseg);
 }
 
+#if !TAU_PROF
 SML_PRIMITIVE void *
 sml_alloc(unsigned int objsize)
 {
@@ -2640,6 +2641,178 @@ alloced:
 	assert(check_filled(OBJ_BEGIN(obj), 0x55, objsize));
 	return obj;
 }
+
+#else 
+SML_PRIMITIVE void *
+sml_alloc_internal(unsigned int objsize, void * frame_pointer)
+{
+	size_t alloc_size;
+	unsigned int blocksize_log2;
+	struct alloc_ptr *ptr;
+	void *obj;
+
+	if (objsize > BLOCKSIZE_MAX - OBJ_HEADER_SIZE)
+		return malloc_object(objsize);
+
+	/* ensure that alloc_size is at least BLOCKSIZE_MIN. */
+	alloc_size = CEILING(OBJ_HEADER_SIZE + objsize, BLOCKSIZE_MIN);
+	blocksize_log2 = CEIL_LOG2(alloc_size);
+	assert(BLOCKSIZE_MIN_LOG2 <= blocksize_log2
+	       && blocksize_log2 <= BLOCKSIZE_MAX_LOG2);
+	ptr = &(worker_tlv_get(alloc_ptr_set)->ptr[blocksize_log2]);
+
+	if (!BITPTR_TEST(ptr->freebit)) {
+		BITPTR_INC(ptr->freebit);
+		obj = ptr->free;
+		ptr->free += ptr->blocksize_bytes;
+		assert(obj != NULL);
+		goto alloced;
+	}
+
+	obj = find_bitmap(ptr);
+	if (obj) goto alloced;
+
+	obj = find_segment(ptr, frame_pointer);
+
+alloced:
+	assert(check_filled(OBJ_BEGIN(obj), 0x55, objsize));
+	return obj;
+}
+
+#include <stdio.h>
+#include <x86intrin.h>
+typedef long long tsc_t;
+static pthread_once_t sml_thread_idx_key_ctl = PTHREAD_ONCE_INIT;
+static pthread_key_t sml_thread_idx_key = -1;
+static pthread_key_t sml_alloc_time_record_key = -1;
+static volatile long sml_thread_idx_counter;
+
+static void sml_thread_idx_key_init(void) {
+  int r0 = pthread_key_create(&sml_thread_idx_key, 0);
+  assert(r0 == 0);
+  int r1 = pthread_key_create(&sml_alloc_time_record_key, 0);
+  assert(r1 == 0);
+  sml_thread_idx_counter = 0;
+}
+
+typedef struct {
+  long idx;                     /* thread idx */
+  long sz;              /* bytes allocated */
+  tsc_t t0;
+  tsc_t t1;
+} sml_alloc_time_record_t;
+
+typedef struct sml_alloc_time_recorder {
+  volatile struct sml_alloc_time_recorder * next;
+  long idx;                     /* thread idx */
+  long capacity;                      /* capacity of a */
+  long n;                       /* next index */
+  sml_alloc_time_record_t * a;
+} sml_alloc_time_recorder_t;
+
+volatile sml_alloc_time_recorder_t * sml_alloc_time_recorders_list = 0;
+
+static void die(const char * s) {
+  fprintf(stderr, "%s\n", s);
+  exit(1);
+}
+
+static void sml_alloc_time_recorder_insert(sml_alloc_time_recorder_t * r) {
+  for (long i = 0; i < 100; i++) {
+    volatile sml_alloc_time_recorder_t * old = sml_alloc_time_recorders_list;
+    r->next = old;
+    if (__sync_bool_compare_and_swap(&sml_alloc_time_recorders_list, old, r)) {
+      return;
+    }
+  }
+  die("sml_alloc_time_recorder_insert: could not insert into recorders list");
+}
+
+static sml_alloc_time_recorder_t * sml_alloc_time_recorder_alloc(long idx) {
+  long capacity = 1024 * 1024;
+  sml_alloc_time_recorder_t * r = malloc(sizeof(sml_alloc_time_recorder_t));
+  r->idx = idx;
+  r->capacity = capacity;
+  r->n = 0;
+  r->a = calloc(capacity, sizeof(sml_alloc_time_record_t));
+  sml_alloc_time_recorder_insert(r);
+  return r;
+}
+
+static void sml_alloc_time_recorder_record(sml_alloc_time_recorder_t * r,
+                                           long idx, unsigned short sz,
+                                           tsc_t t0, tsc_t t1) {
+  long n = r->n;
+  sml_alloc_time_record_t * a = r->a;
+  assert(n < r->capacity);
+  a[n].idx = idx;
+  a[n].sz = sz;
+  a[n].t0 = t0;
+  a[n].t1 = t1;
+  r->n = n + 1;
+}
+
+static void sml_alloc_time_recorder_dump() {
+  const char * filename = getenv("SML_ALLOC_DUMP");
+  if (filename) {
+    fprintf(stderr, "dumping alloc time record to %s\n", filename);
+    FILE * wp = fopen(filename, "wb");
+    for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
+         r; r = r->next) {
+      size_t nw = fwrite(&r->a, sizeof(sml_alloc_time_record_t), r->n, wp);
+      assert(nw == r->n);
+    }
+    fclose(wp);
+  }
+}
+
+static void sml_alloc_time_recorder_reset(sml_alloc_time_recorder_t * r) {
+  r->n = 0;
+}
+
+static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
+  if (sml_thread_idx_key == -1) {
+    pthread_once(&sml_thread_idx_key_ctl,
+                 sml_thread_idx_key_init);
+  }
+  sml_alloc_time_recorder_t * r
+    = (sml_alloc_time_recorder_t *)pthread_getspecific(sml_alloc_time_record_key);
+  long idx = -1;
+  if (!r) {
+    idx = (long)pthread_getspecific(sml_thread_idx_key);
+    assert(idx == 0);
+    idx = __sync_fetch_and_add(&sml_thread_idx_counter, 1);
+    pthread_setspecific(sml_thread_idx_key, (void *)idx);
+  } else {
+    idx = (long)pthread_getspecific(sml_thread_idx_key);
+  }
+  if (!r || r->n == r->sz) {
+    r = sml_alloc_time_recorder_alloc(idx);
+    pthread_setspecific(sml_alloc_time_record_key, r);
+  }
+  return r;
+}
+
+static void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1) {
+  sml_alloc_time_recorder_t * r = sml_alloc_time_getspecific();
+  sml_alloc_time_recorder_record(r, sz, t0, t1);
+}
+
+SML_PRIMITIVE void sml_dump_alloc_time(void) {
+  sml_alloc_time_recorder_dump();
+}
+
+SML_PRIMITIVE void *
+sml_alloc(unsigned int objsize)
+{
+  tsc_t t0 = _rdtsc();
+  void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
+  tsc_t t1 = _rdtsc();
+  sml_record_alloc_time(objsize, t0, t1);
+  return obj;
+}
+
+#endif
 
 /********** initialize/finalize garbage collection ***********/
 
