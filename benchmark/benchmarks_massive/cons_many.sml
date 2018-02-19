@@ -20,7 +20,7 @@ fun do_it n m 0 = 0
   | do_it n m rep = 
     let
 	val t0 = Time.now ()
-	val x = make_tasks n m
+	val x = make_tasks ((n + m - 1) div m) m
 	val t1 = Time.now ()
     in
 	print (Time.fmt 6 (Time.- (t1, t0))); print "\n";

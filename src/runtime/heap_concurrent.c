@@ -2752,14 +2752,24 @@ static void sml_alloc_time_recorder_record(sml_alloc_time_recorder_t * r,
   r->n = n + 1;
 }
 
+char * sml_get_alloc_dump_filename() {
+  static char * sml_alloc_dump_filename = 0;
+  static int sml_alloc_dump_filename_chk = 0;
+  if (!sml_alloc_dump_filename_chk) {
+    sml_alloc_dump_filename = getenv("SML_ALLOC_DUMP");
+    sml_alloc_dump_filename_chk = 1;
+  }
+  return sml_alloc_dump_filename;
+}
+
 static void sml_alloc_time_recorder_dump() {
-  const char * filename = getenv("SML_ALLOC_DUMP");
+  char * filename = sml_get_alloc_dump_filename();
   if (filename) {
     fprintf(stderr, "dumping alloc time record to %s\n", filename);
     FILE * wp = fopen(filename, "wb");
     for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
          r; r = r->next) {
-      size_t nw = fwrite((void *)&r->a,
+      size_t nw = fwrite((void *)r->a,
 			 sizeof(sml_alloc_time_record_t), r->n, wp);
       assert(nw == r->n);
     }
@@ -2796,7 +2806,7 @@ static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
 
 static void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1) {
   sml_alloc_time_recorder_t * r = sml_alloc_time_getspecific();
-  sml_alloc_time_recorder_record(r, sz, t0, t1, r->idx);
+  sml_alloc_time_recorder_record(r, r->idx, sz, t0, t1);
 }
 
 SML_PRIMITIVE void sml_dump_alloc_time(void) {
@@ -2806,11 +2816,17 @@ SML_PRIMITIVE void sml_dump_alloc_time(void) {
 SML_PRIMITIVE void *
 sml_alloc(unsigned int objsize)
 {
-  tsc_t t0 = _rdtsc();
-  void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
-  tsc_t t1 = _rdtsc();
-  sml_record_alloc_time(objsize, t0, t1);
-  return obj;
+  char * filename = sml_get_alloc_dump_filename();
+  if (filename) {
+    tsc_t t0 = _rdtsc();
+    void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
+    tsc_t t1 = _rdtsc();
+    sml_record_alloc_time(objsize, t0, t1);
+    return obj;
+  } else {
+    void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
+    return obj;
+  }
 }
 
 #endif
