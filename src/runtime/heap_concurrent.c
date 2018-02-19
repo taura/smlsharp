@@ -3,6 +3,9 @@
  * @copyright (c) 2015, Tohoku University.
  * @author UENO Katsuhiro
  */
+#if TAU_PROF
+#undef NDEBUG
+#endif
 
 #include "smlsharp.h"
 #include <stdlib.h>
@@ -2706,6 +2709,7 @@ typedef struct sml_alloc_time_recorder {
   volatile struct sml_alloc_time_recorder * next;
   long idx;                     /* thread idx */
   long capacity;                      /* capacity of a */
+  long dt;
   long n;                       /* next index */
   sml_alloc_time_record_t * a;
 } sml_alloc_time_recorder_t;
@@ -2734,6 +2738,7 @@ static sml_alloc_time_recorder_t * sml_alloc_time_recorder_alloc(long idx) {
   r->idx = idx;
   r->capacity = capacity;
   r->n = 0;
+  r->dt = 0;
   r->a = calloc(capacity, sizeof(sml_alloc_time_record_t));
   sml_alloc_time_recorder_insert(r);
   return r;
@@ -2743,13 +2748,16 @@ static void sml_alloc_time_recorder_record(sml_alloc_time_recorder_t * r,
                                            long idx, unsigned short sz,
                                            tsc_t t0, tsc_t t1) {
   long n = r->n;
+#if 0
   sml_alloc_time_record_t * a = r->a;
   assert(n < r->capacity);
   a[n].idx = idx;
   a[n].sz = sz;
   a[n].t0 = t0;
   a[n].t1 = t1;
+#endif
   r->n = n + 1;
+  r->dt += (t1 - t0);
 }
 
 char * sml_get_alloc_dump_filename() {
@@ -2797,10 +2805,11 @@ static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
   } else {
     idx = (long)pthread_getspecific(sml_thread_idx_key);
   }
-  if (!r || r->n == r->capacity) {
+  if (!r) {                     /* || r->n == r->capacity */
     r = sml_alloc_time_recorder_alloc(idx);
     pthread_setspecific(sml_alloc_time_record_key, r);
   }
+  assert(r->n < r->capacity);
   return r;
 }
 
