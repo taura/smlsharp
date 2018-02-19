@@ -2729,7 +2729,7 @@ static void sml_alloc_time_recorder_insert(sml_alloc_time_recorder_t * r) {
 }
 
 static sml_alloc_time_recorder_t * sml_alloc_time_recorder_alloc(long idx) {
-  long capacity = 1024 * 1024;
+  long capacity = 1024 * 1024 * 16;
   sml_alloc_time_recorder_t * r = malloc(sizeof(sml_alloc_time_recorder_t));
   r->idx = idx;
   r->capacity = capacity;
@@ -2777,8 +2777,15 @@ static void sml_alloc_time_recorder_dump() {
   }
 }
 
-static void sml_alloc_time_recorder_reset(sml_alloc_time_recorder_t * r) {
-  r->n = 0;
+static void sml_alloc_time_recorder_reset() {
+  volatile sml_alloc_time_recorder_t * next = 0;
+  for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
+       r; r = next) {
+    next = r->next;
+    free(r->a);
+    free((void *)r);
+  }
+  sml_alloc_time_recorders_list = 0;
 }
 
 static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
@@ -2811,6 +2818,10 @@ static void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1) {
 
 SML_PRIMITIVE void sml_dump_alloc_time(void) {
   sml_alloc_time_recorder_dump();
+}
+
+SML_PRIMITIVE void sml_reset_alloc_time(void) {
+  sml_alloc_time_recorder_reset();
 }
 
 SML_PRIMITIVE void *
