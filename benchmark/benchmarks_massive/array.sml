@@ -53,9 +53,10 @@ fun main args =
       val m = parse_int_nth args 1 40
       val r = parse_int_nth args 2 5
   in
-      print (Int.toString n); print "\n";
-      print (Int.toString m); print "\n";
-      print (Int.toString r); print "\n";
+      print ("app=array\n");
+      print ("elems="  ^ (Int.toString n) ^ "\n");
+      print ("tasks="  ^ (Int.toString m) ^ "\n");
+      print ("repeat=" ^ (Int.toString r) ^ "\n");
       do_it n m r
   end
 
