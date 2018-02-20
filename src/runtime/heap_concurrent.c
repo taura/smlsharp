@@ -52,7 +52,22 @@ enum {
   SML_ALLOC_FAST,
   SML_ALLOC_FINDBITMAP,
   SML_ALLOC_FINDSEGMENT,
+  SML_ALLOC_FIND_SEGMENT_0,
+  SML_ALLOC_INC_NUM_FILLED,
+  SML_ALLOC_TRY_FIND_SEGMENT,
+  SML_ALLOC_REQUEST_SEGMENT,
   SML_ALLOC_LAST
+};
+
+const char * sml_alloc_sym[SML_ALLOC_LAST] = {
+  "MALLOC_OBJECT",
+  "FAST",
+  "FIND_BITMAP",
+  "FIND_SEGMENT",
+  "FIND_SEGMENT_0",
+  "INC_NUM_FILLED",
+  "TRY_FIND_SEGMENT",
+  "REQUEST_SEGMENT",
 };
 
 static void sml_thread_idx_key_init(void) {
@@ -148,8 +163,8 @@ static void sml_alloc_time_recorder_dump() {
     for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
          r; r = r->next) {
       for (long i = 0; i < SML_ALLOC_LAST; i++) {
-        printf("thread: %ld, idx: %ld, n: %ld, dt: %ld, avg: %f\n",
-               r->idx, i, r->evts[i].n, r->evts[i].dt,
+        printf("thread: %ld, idx: %s, n: %ld, dt: %ld, avg: %f\n",
+               r->idx, sml_alloc_sym[i], r->evts[i].n, r->evts[i].dt,
                (double)r->evts[i].dt / (double)r->evts[i].n);
       }
 #if 0
@@ -2787,6 +2802,9 @@ find_segment(struct alloc_ptr *ptr, void *frame_pointer)
 	unsigned int blocksize_log2;
 	struct subheap *subheap;
 	void *obj;
+#if TAU_PROF
+	tsc_t t0 = get_tsc();
+#endif
 
 #ifndef WITHOUT_MULTITHREAD
 	if (load_relaxed(&sml_check_flag))
@@ -2802,15 +2820,37 @@ find_segment(struct alloc_ptr *ptr, void *frame_pointer)
 	       && blocksize_log2 <= BLOCKSIZE_MAX_LOG2);
 	subheap = &global_subheaps[blocksize_log2];
 
+#if TAU_PROF
+	tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_FIND_SEGMENT_0);
+#endif
+	
 	if (ptr->free) {
-		move_to_filled(ptr, subheap);
-		inc_num_filled_total();
+#if TAU_PROF
+	  tsc_t t0 = get_tsc();
+#endif
+	  move_to_filled(ptr, subheap);
+	  inc_num_filled_total();
+#if TAU_PROF
+	  tsc_t t1 = get_tsc();
+	  sml_record_alloc_time(0, t0, t1, SML_ALLOC_INC_NUM_FILLED);
+#endif
 	}
 
+#if TAU_PROF
+	tsc_t t2 = get_tsc();
+#endif
 	obj = try_find_segment(subheap, ptr, blocksize_log2);
+#if TAU_PROF
+	tsc_t t3 = get_tsc();
+	sml_record_alloc_time(0, t2, t3, SML_ALLOC_TRY_FIND_SEGMENT);
+#endif
 	if (obj)
 		return obj;
 
+#if TAU_PROF
+	tsc_t t4 = get_tsc();
+#endif
 #ifdef GCTIME
 	sml_timer_t t1;
 	sml_timer_now(t1);
@@ -2832,6 +2872,10 @@ find_segment(struct alloc_ptr *ptr, void *frame_pointer)
 	mutex_unlock(&gctime.pause_time_lock);
 #endif /* GCTIME */
 
+#if TAU_PROF
+	tsc_t t5 = get_tsc();
+	sml_record_alloc_time(0, t4, t5, SML_ALLOC_REQUEST_SEGMENT);
+#endif
 	assert(obj != NULL);
 	return obj;
 }
