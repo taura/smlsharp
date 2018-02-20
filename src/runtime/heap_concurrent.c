@@ -5,6 +5,8 @@
  */
 #if TAU_PROF
 #undef NDEBUG
+#include <assert.h>
+#include <stdio.h>
 #endif
 
 #include "smlsharp.h"
@@ -2039,10 +2041,20 @@ struct collector_control {
 static void
 inc_num_filled_total()
 {
+#if TAU_PROF
+	mutex_lock(&collector_control.lock);
+        unsigned int nfd = collector.num_filled_total;
+        collector.num_filled_total = nfd + 1;
+        if (nfd >= collector.gc_threshold) {
+          cond_signal(&collector_control.cond_collector);
+        }
+	mutex_unlock(&collector_control.lock);
+#else
 	fetch_add(relaxed, &collector.num_filled_total, 1);
 	mutex_lock(&collector_control.lock);
 	cond_signal(&collector_control.cond_collector);
 	mutex_unlock(&collector_control.lock);
+#endif
 }
 
 static void
@@ -2124,6 +2136,21 @@ count_vote(unsigned int num_stalled)
 		|| cc->exit);
 }
 
+#if TAU_PROF
+#include <x86intrin.h>
+typedef long long tsc_t;
+
+tsc_t get_ns() {
+  struct timespec ts[1];
+  clock_gettime(CLOCK_REALTIME, ts);
+  return ts->tv_sec * 1000000000 + ts->tv_nsec;
+}
+
+SML_PRIMITIVE tsc_t get_tsc() {
+  return _rdtsc();
+}
+#endif
+
 static void *
 collector_main(void *arg ATTR_UNUSED)
 {
@@ -2136,13 +2163,36 @@ collector_main(void *arg ATTR_UNUSED)
 		 || (load_relaxed(&collector.num_filled_total)
 		     >= collector.gc_threshold)
 		 || cc->exit))
-		cond_wait(&cc->cond_collector, &cc->lock);
+#if TAU_PROF
+          {
+            cond_wait(&cc->cond_collector, &cc->lock);
+            if (0) {
+              printf("GC thread wake up"
+                     " mutators_stalled=%d"
+                     " num_filled_total=%d"
+                     " gc_threshold=%d\n", 
+                     cc->mutators_stalled,
+                     collector.num_filled_total,
+                     collector.gc_threshold);
+            }
+          }
+#else
+          cond_wait(&cc->cond_collector, &cc->lock);
+#endif
 	store_relaxed(&collector.num_request, cc->mutators_stalled);
 	mutex_unlock(&cc->lock);
 	if (cc->exit)
 		return NULL;
 
+#if TAU_PROF
+        //printf("do_gc begin\n");
+        tsc_t t0 = get_tsc();
+#endif
 	do_gc();
+#if TAU_PROF
+        tsc_t t1 = get_tsc();
+        //printf("do_gc end %lld\n", t1 - t0);
+#endif
 	mutex_lock(&cc->lock);
 
 	cc->gc_count++;
@@ -2683,8 +2733,6 @@ alloced:
 }
 
 #include <stdio.h>
-#include <x86intrin.h>
-typedef long long tsc_t;
 static pthread_once_t sml_thread_idx_key_ctl = PTHREAD_ONCE_INIT;
 static pthread_key_t sml_thread_idx_key = -1;
 static pthread_key_t sml_alloc_time_record_key = -1;
@@ -2708,7 +2756,7 @@ typedef struct {
 typedef struct sml_alloc_time_recorder {
   volatile struct sml_alloc_time_recorder * next;
   long idx;                     /* thread idx */
-  long capacity;                      /* capacity of a */
+  long capacity;                /* capacity of a */
   long dt;
   long n;                       /* next index */
   sml_alloc_time_record_t * a;
@@ -2733,7 +2781,8 @@ static void sml_alloc_time_recorder_insert(sml_alloc_time_recorder_t * r) {
 }
 
 static sml_alloc_time_recorder_t * sml_alloc_time_recorder_alloc(long idx) {
-  long capacity = 1024 * 1024 * 16;
+  long log_capacity = 18;
+  long capacity = 1 << log_capacity;
   sml_alloc_time_recorder_t * r = malloc(sizeof(sml_alloc_time_recorder_t));
   r->idx = idx;
   r->capacity = capacity;
@@ -2747,16 +2796,13 @@ static sml_alloc_time_recorder_t * sml_alloc_time_recorder_alloc(long idx) {
 static void sml_alloc_time_recorder_record(sml_alloc_time_recorder_t * r,
                                            long idx, unsigned short sz,
                                            tsc_t t0, tsc_t t1) {
-  long n = r->n;
-#if 0
+  long p = r->n & (r->capacity - 1);
   sml_alloc_time_record_t * a = r->a;
-  assert(n < r->capacity);
-  a[n].idx = idx;
-  a[n].sz = sz;
-  a[n].t0 = t0;
-  a[n].t1 = t1;
-#endif
-  r->n = n + 1;
+  a[p].idx = idx;
+  a[p].sz = sz;
+  a[p].t0 = t0;
+  a[p].t1 = t1;
+  r->n += 1;
   r->dt += (t1 - t0);
 }
 
@@ -2778,12 +2824,23 @@ static void sml_alloc_time_recorder_dump() {
     for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
          r; r = r->next) {
       printf("idx: %ld, n: %ld, dt: %ld, avg: %f\n",
-	     r->idx, r->n, r->dt, (double)r->dt / (double)r->n);
-#if 0
-      size_t nw = fwrite((void *)r->a,
-			 sizeof(sml_alloc_time_record_t), r->n, wp);
-      assert(nw == r->n);
-#endif
+             r->idx, r->n, r->dt, (double)r->dt / (double)r->n);
+      if (r->n < r->capacity) {
+        size_t nw = fwrite((void *)r->a,
+                           sizeof(sml_alloc_time_record_t), r->n, wp);
+        assert(nw == r->n);
+      } else {
+        long b = (r->n - r->capacity) & (r->capacity - 1);
+        long n0 = r->capacity - b;
+        long n1 = b;
+        /* dump a[b:n] */
+        size_t nw0 = fwrite((void *)&r->a[b],
+                           sizeof(sml_alloc_time_record_t), n0, wp);
+        assert(nw0 == n0);
+        size_t nw1 = fwrite((void *)&r->a[0],
+                            sizeof(sml_alloc_time_record_t), n1, wp);
+        assert(nw1 == n1);
+      }
     }
     fclose(wp);
   }
@@ -2793,6 +2850,7 @@ static void sml_alloc_time_recorder_reset() {
   for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
        r; r = r->next) {
     r->n = 0;
+    r->dt = 0;
   }
 }
 
@@ -2832,20 +2890,14 @@ SML_PRIMITIVE void sml_reset_alloc_time(void) {
   sml_alloc_time_recorder_reset();
 }
 
-tsc_t get_ns() {
-  struct timespec ts[1];
-  clock_gettime(CLOCK_REALTIME, ts);
-  return ts->tv_sec * 1000000000 + ts->tv_nsec;
-}
-
 SML_PRIMITIVE void *
 sml_alloc(unsigned int objsize)
 {
   char * filename = sml_get_alloc_dump_filename();
   if (filename) {
-    tsc_t t0 = get_ns();
+    tsc_t t0 = get_tsc(); // get_ns();
     void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
-    tsc_t t1 = get_ns();
+    tsc_t t1 = get_tsc(); // get_ns();
     sml_record_alloc_time(objsize, t0, t1);
     return obj;
   } else {
@@ -2895,10 +2947,13 @@ sml_heap_stop()
 void
 sml_heap_destroy()
 {
+#if TAU_PROF
+  printf("sml_heap_destroy\n");
+#endif
 #if !defined WITHOUT_MULTITHREAD && !defined WITHOUT_CONCURRENCY
 	assert(collector_control.exit == 1);
 #endif /* !WITHOUT_MULTITHREAD && !WITHOUT_CONCURRENCY */
-
+        
 #ifdef GCTIME
 	sml_timer_now(gctime.exec_end);
 	sml_timer_dif(gctime.exec_start, gctime.exec_end, gctime.exec_time);
