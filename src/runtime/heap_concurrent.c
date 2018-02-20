@@ -3,10 +3,10 @@
  * @copyright (c) 2015, Tohoku University.
  * @author UENO Katsuhiro
  */
+
 #if TAU_PROF
 #undef NDEBUG
 #include <assert.h>
-#include <stdio.h>
 #endif
 
 #include "smlsharp.h"
@@ -23,6 +23,207 @@
 #endif /* HAVE_CONFIG_H */
 #include "object.h"
 #include "heap.h"
+
+#if TAU_PROF
+#undef NDEBUG
+#include <assert.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <x86intrin.h>
+typedef long long tsc_t;
+
+tsc_t get_ns() {
+  struct timespec ts[1];
+  clock_gettime(CLOCK_REALTIME, ts);
+  return ts->tv_sec * 1000000000 + ts->tv_nsec;
+}
+
+SML_PRIMITIVE tsc_t get_tsc() {
+  return _rdtsc();
+}
+
+static pthread_once_t sml_thread_idx_key_ctl = PTHREAD_ONCE_INIT;
+static pthread_key_t sml_thread_idx_key = -1;
+static pthread_key_t sml_alloc_time_record_key = -1;
+static volatile long sml_thread_idx_counter;
+
+enum {
+  SML_ALLOC_MALLOC_OBJECT,
+  SML_ALLOC_FAST,
+  SML_ALLOC_FINDBITMAP,
+  SML_ALLOC_FINDSEGMENT,
+  SML_ALLOC_LAST
+};
+
+static void sml_thread_idx_key_init(void) {
+  int r0 = pthread_key_create(&sml_thread_idx_key, 0);
+  assert(r0 == 0);
+  int r1 = pthread_key_create(&sml_alloc_time_record_key, 0);
+  assert(r1 == 0);
+  sml_thread_idx_counter = 0;
+}
+
+typedef struct {
+  long idx;                     /* thread idx */
+  long sz;              /* bytes allocated */
+  tsc_t t0;
+  tsc_t t1;
+} sml_alloc_time_record_t;
+
+typedef struct sml_alloc_time_recorder {
+  volatile struct sml_alloc_time_recorder * next;
+  long idx;                     /* thread idx */
+  long capacity;                /* capacity of a */
+  struct {
+    long dt;
+    long n;
+  } evts[SML_ALLOC_LAST];
+  sml_alloc_time_record_t * a;
+} sml_alloc_time_recorder_t;
+
+volatile sml_alloc_time_recorder_t * sml_alloc_time_recorders_list = 0;
+
+static void die(const char * s) {
+  fprintf(stderr, "%s\n", s);
+  exit(1);
+}
+
+static void sml_alloc_time_recorder_insert(sml_alloc_time_recorder_t * r) {
+  for (long i = 0; i < 100; i++) {
+    volatile sml_alloc_time_recorder_t * old = sml_alloc_time_recorders_list;
+    r->next = old;
+    if (__sync_bool_compare_and_swap(&sml_alloc_time_recorders_list, old, r)) {
+      return;
+    }
+  }
+  die("sml_alloc_time_recorder_insert: could not insert into recorders list");
+}
+
+static sml_alloc_time_recorder_t * sml_alloc_time_recorder_alloc(long idx) {
+  long log_capacity = 18;
+  long capacity = 1 << log_capacity;
+  sml_alloc_time_recorder_t * r = malloc(sizeof(sml_alloc_time_recorder_t));
+  r->idx = idx;
+  r->capacity = capacity;
+  for (long i = 0; i < SML_ALLOC_LAST; i++) {
+    r->evts[i].n = 0;
+    r->evts[i].dt = 0;
+  }
+  r->a = calloc(capacity, sizeof(sml_alloc_time_record_t));
+  sml_alloc_time_recorder_insert(r);
+  return r;
+}
+
+static void sml_alloc_time_recorder_record(sml_alloc_time_recorder_t * r,
+                                           long idx, unsigned short sz,
+                                           tsc_t t0, tsc_t t1,
+                                           long evt_idx) {
+#if 0
+  long p = r->n & (r->capacity - 1);
+  sml_alloc_time_record_t * a = r->a;
+  a[p].idx = idx;
+  a[p].sz = sz;
+  a[p].t0 = t0;
+  a[p].t1 = t1;
+#endif
+  r->evts[evt_idx].n += 1;
+  r->evts[evt_idx].dt += (t1 - t0);
+}
+
+char * sml_get_alloc_dump_filename() {
+  static char * sml_alloc_dump_filename = 0;
+  static int sml_alloc_dump_filename_chk = 0;
+  if (!sml_alloc_dump_filename_chk) {
+    sml_alloc_dump_filename = getenv("SML_ALLOC_DUMP");
+    sml_alloc_dump_filename_chk = 1;
+  }
+  return sml_alloc_dump_filename;
+}
+
+static void sml_alloc_time_recorder_dump() {
+  char * filename = sml_get_alloc_dump_filename();
+  if (filename) {
+    fprintf(stderr, "dumping alloc time record to %s\n", filename);
+    FILE * wp = fopen(filename, "wb");
+    for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
+         r; r = r->next) {
+      for (long i = 0; i < SML_ALLOC_LAST; i++) {
+        printf("thread: %ld, idx: %ld, n: %ld, dt: %ld, avg: %f\n",
+               r->idx, i, r->evts[i].n, r->evts[i].dt,
+               (double)r->evts[i].dt / (double)r->evts[i].n);
+      }
+#if 0
+      if (r->n < r->capacity) {
+        size_t nw = fwrite((void *)r->a,
+                           sizeof(sml_alloc_time_record_t), r->n, wp);
+        assert(nw == r->n);
+      } else {
+        long b = (r->n - r->capacity) & (r->capacity - 1);
+        long n0 = r->capacity - b;
+        long n1 = b;
+        /* dump a[b:n] */
+        size_t nw0 = fwrite((void *)&r->a[b],
+                           sizeof(sml_alloc_time_record_t), n0, wp);
+        assert(nw0 == n0);
+        size_t nw1 = fwrite((void *)&r->a[0],
+                            sizeof(sml_alloc_time_record_t), n1, wp);
+        assert(nw1 == n1);
+      }
+#endif
+    }
+    fclose(wp);
+  }
+}
+
+static void sml_alloc_time_recorder_reset() {
+  for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
+       r; r = r->next) {
+    for (long i = 0; i < SML_ALLOC_LAST; i++) {
+      r->evts[i].n = 0;
+      r->evts[i].dt = 0;
+    }
+  }
+}
+
+static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
+  if (sml_thread_idx_key == -1) {
+    pthread_once(&sml_thread_idx_key_ctl,
+                 sml_thread_idx_key_init);
+  }
+  sml_alloc_time_recorder_t * r
+    = (sml_alloc_time_recorder_t *)pthread_getspecific(sml_alloc_time_record_key);
+  long idx = -1;
+  if (!r) {
+    idx = (long)pthread_getspecific(sml_thread_idx_key);
+    assert(idx == 0);
+    idx = __sync_fetch_and_add(&sml_thread_idx_counter, 1);
+    pthread_setspecific(sml_thread_idx_key, (void *)idx);
+  } else {
+    idx = (long)pthread_getspecific(sml_thread_idx_key);
+  }
+  if (!r) {                     /* || r->n == r->capacity */
+    r = sml_alloc_time_recorder_alloc(idx);
+    pthread_setspecific(sml_alloc_time_record_key, r);
+  }
+  return r;
+}
+
+static void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1,
+                                  long evt_idx) {
+  sml_alloc_time_recorder_t * r = sml_alloc_time_getspecific();
+  sml_alloc_time_recorder_record(r, r->idx, sz, t0, t1, evt_idx);
+}
+
+SML_PRIMITIVE void sml_dump_alloc_time(void) {
+  sml_alloc_time_recorder_dump();
+}
+
+SML_PRIMITIVE void sml_reset_alloc_time(void) {
+  sml_alloc_time_recorder_reset();
+}
+#endif  /* TAU_PROF */
+
+
 
 #define load_add_store_relaxed(p,n)  store_relaxed((p), load_relaxed(p) + (n))
 #define load_sub_store_relaxed(p,n)  store_relaxed((p), load_relaxed(p) - (n))
@@ -2041,7 +2242,7 @@ struct collector_control {
 static void
 inc_num_filled_total()
 {
-#if TAU_PROF
+#if 0 && TAU_PROF
 	mutex_lock(&collector_control.lock);
         unsigned int nfd = collector.num_filled_total;
         collector.num_filled_total = nfd + 1;
@@ -2135,21 +2336,6 @@ count_vote(unsigned int num_stalled)
 		|| cc->vote_continue > 0
 		|| cc->exit);
 }
-
-#if TAU_PROF
-#include <x86intrin.h>
-typedef long long tsc_t;
-
-tsc_t get_ns() {
-  struct timespec ts[1];
-  clock_gettime(CLOCK_REALTIME, ts);
-  return ts->tv_sec * 1000000000 + ts->tv_nsec;
-}
-
-SML_PRIMITIVE tsc_t get_tsc() {
-  return _rdtsc();
-}
-#endif
 
 static void *
 collector_main(void *arg ATTR_UNUSED)
@@ -2704,8 +2890,13 @@ sml_alloc_internal(unsigned int objsize, void * frame_pointer)
 	struct alloc_ptr *ptr;
 	void *obj;
 
-	if (objsize > BLOCKSIZE_MAX - OBJ_HEADER_SIZE)
-		return malloc_object(objsize);
+        tsc_t t0 = get_tsc();
+	if (objsize > BLOCKSIZE_MAX - OBJ_HEADER_SIZE) {
+          void * o = malloc_object(objsize);
+          tsc_t t1 = get_tsc();
+          sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_MALLOC_OBJECT);
+          return o;
+        }
 
 	/* ensure that alloc_size is at least BLOCKSIZE_MIN. */
 	alloc_size = CEILING(OBJ_HEADER_SIZE + objsize, BLOCKSIZE_MIN);
@@ -2719,175 +2910,24 @@ sml_alloc_internal(unsigned int objsize, void * frame_pointer)
 		obj = ptr->free;
 		ptr->free += ptr->blocksize_bytes;
 		assert(obj != NULL);
+                tsc_t t1 = get_tsc();
+                sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_FAST);
 		goto alloced;
 	}
 
 	obj = find_bitmap(ptr);
-	if (obj) goto alloced;
+	if (obj) {
+          tsc_t t1 = get_tsc();
+          sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_FINDBITMAP);
+          goto alloced;
+        }
 
 	obj = find_segment(ptr, frame_pointer);
-
+        tsc_t t1 = get_tsc();
+        sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_FINDSEGMENT);
 alloced:
 	assert(check_filled(OBJ_BEGIN(obj), 0x55, objsize));
 	return obj;
-}
-
-#include <stdio.h>
-static pthread_once_t sml_thread_idx_key_ctl = PTHREAD_ONCE_INIT;
-static pthread_key_t sml_thread_idx_key = -1;
-static pthread_key_t sml_alloc_time_record_key = -1;
-static volatile long sml_thread_idx_counter;
-
-static void sml_thread_idx_key_init(void) {
-  int r0 = pthread_key_create(&sml_thread_idx_key, 0);
-  assert(r0 == 0);
-  int r1 = pthread_key_create(&sml_alloc_time_record_key, 0);
-  assert(r1 == 0);
-  sml_thread_idx_counter = 0;
-}
-
-typedef struct {
-  long idx;                     /* thread idx */
-  long sz;              /* bytes allocated */
-  tsc_t t0;
-  tsc_t t1;
-} sml_alloc_time_record_t;
-
-typedef struct sml_alloc_time_recorder {
-  volatile struct sml_alloc_time_recorder * next;
-  long idx;                     /* thread idx */
-  long capacity;                /* capacity of a */
-  long dt;
-  long n;                       /* next index */
-  sml_alloc_time_record_t * a;
-} sml_alloc_time_recorder_t;
-
-volatile sml_alloc_time_recorder_t * sml_alloc_time_recorders_list = 0;
-
-static void die(const char * s) {
-  fprintf(stderr, "%s\n", s);
-  exit(1);
-}
-
-static void sml_alloc_time_recorder_insert(sml_alloc_time_recorder_t * r) {
-  for (long i = 0; i < 100; i++) {
-    volatile sml_alloc_time_recorder_t * old = sml_alloc_time_recorders_list;
-    r->next = old;
-    if (__sync_bool_compare_and_swap(&sml_alloc_time_recorders_list, old, r)) {
-      return;
-    }
-  }
-  die("sml_alloc_time_recorder_insert: could not insert into recorders list");
-}
-
-static sml_alloc_time_recorder_t * sml_alloc_time_recorder_alloc(long idx) {
-  long log_capacity = 18;
-  long capacity = 1 << log_capacity;
-  sml_alloc_time_recorder_t * r = malloc(sizeof(sml_alloc_time_recorder_t));
-  r->idx = idx;
-  r->capacity = capacity;
-  r->n = 0;
-  r->dt = 0;
-  r->a = calloc(capacity, sizeof(sml_alloc_time_record_t));
-  sml_alloc_time_recorder_insert(r);
-  return r;
-}
-
-static void sml_alloc_time_recorder_record(sml_alloc_time_recorder_t * r,
-                                           long idx, unsigned short sz,
-                                           tsc_t t0, tsc_t t1) {
-  long p = r->n & (r->capacity - 1);
-  sml_alloc_time_record_t * a = r->a;
-  a[p].idx = idx;
-  a[p].sz = sz;
-  a[p].t0 = t0;
-  a[p].t1 = t1;
-  r->n += 1;
-  r->dt += (t1 - t0);
-}
-
-char * sml_get_alloc_dump_filename() {
-  static char * sml_alloc_dump_filename = 0;
-  static int sml_alloc_dump_filename_chk = 0;
-  if (!sml_alloc_dump_filename_chk) {
-    sml_alloc_dump_filename = getenv("SML_ALLOC_DUMP");
-    sml_alloc_dump_filename_chk = 1;
-  }
-  return sml_alloc_dump_filename;
-}
-
-static void sml_alloc_time_recorder_dump() {
-  char * filename = sml_get_alloc_dump_filename();
-  if (filename) {
-    fprintf(stderr, "dumping alloc time record to %s\n", filename);
-    FILE * wp = fopen(filename, "wb");
-    for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
-         r; r = r->next) {
-      printf("idx: %ld, n: %ld, dt: %ld, avg: %f\n",
-             r->idx, r->n, r->dt, (double)r->dt / (double)r->n);
-      if (r->n < r->capacity) {
-        size_t nw = fwrite((void *)r->a,
-                           sizeof(sml_alloc_time_record_t), r->n, wp);
-        assert(nw == r->n);
-      } else {
-        long b = (r->n - r->capacity) & (r->capacity - 1);
-        long n0 = r->capacity - b;
-        long n1 = b;
-        /* dump a[b:n] */
-        size_t nw0 = fwrite((void *)&r->a[b],
-                           sizeof(sml_alloc_time_record_t), n0, wp);
-        assert(nw0 == n0);
-        size_t nw1 = fwrite((void *)&r->a[0],
-                            sizeof(sml_alloc_time_record_t), n1, wp);
-        assert(nw1 == n1);
-      }
-    }
-    fclose(wp);
-  }
-}
-
-static void sml_alloc_time_recorder_reset() {
-  for (volatile sml_alloc_time_recorder_t * r = sml_alloc_time_recorders_list;
-       r; r = r->next) {
-    r->n = 0;
-    r->dt = 0;
-  }
-}
-
-static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
-  if (sml_thread_idx_key == -1) {
-    pthread_once(&sml_thread_idx_key_ctl,
-                 sml_thread_idx_key_init);
-  }
-  sml_alloc_time_recorder_t * r
-    = (sml_alloc_time_recorder_t *)pthread_getspecific(sml_alloc_time_record_key);
-  long idx = -1;
-  if (!r) {
-    idx = (long)pthread_getspecific(sml_thread_idx_key);
-    assert(idx == 0);
-    idx = __sync_fetch_and_add(&sml_thread_idx_counter, 1);
-    pthread_setspecific(sml_thread_idx_key, (void *)idx);
-  } else {
-    idx = (long)pthread_getspecific(sml_thread_idx_key);
-  }
-  if (!r) {                     /* || r->n == r->capacity */
-    r = sml_alloc_time_recorder_alloc(idx);
-    pthread_setspecific(sml_alloc_time_record_key, r);
-  }
-  return r;
-}
-
-static void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1) {
-  sml_alloc_time_recorder_t * r = sml_alloc_time_getspecific();
-  sml_alloc_time_recorder_record(r, r->idx, sz, t0, t1);
-}
-
-SML_PRIMITIVE void sml_dump_alloc_time(void) {
-  sml_alloc_time_recorder_dump();
-}
-
-SML_PRIMITIVE void sml_reset_alloc_time(void) {
-  sml_alloc_time_recorder_reset();
 }
 
 SML_PRIMITIVE void *
@@ -2895,10 +2935,10 @@ sml_alloc(unsigned int objsize)
 {
   char * filename = sml_get_alloc_dump_filename();
   if (filename) {
-    tsc_t t0 = get_tsc(); // get_ns();
+    //tsc_t t0 = get_tsc(); // get_ns();
     void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
-    tsc_t t1 = get_tsc(); // get_ns();
-    sml_record_alloc_time(objsize, t0, t1);
+    //tsc_t t1 = get_tsc(); // get_ns();
+    //sml_record_alloc_time(objsize, t0, t1);
     return obj;
   } else {
     void * obj = sml_alloc_internal(objsize, CALLER_FRAME_END_ADDRESS());
