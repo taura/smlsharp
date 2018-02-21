@@ -69,6 +69,18 @@ enum {
   SML_ALLOC_WAIT_FOR_GC_COND_SIGNAL,
   SML_ALLOC_WAIT_FOR_GC_COND_WAIT,
   SML_ALLOC_WAIT_FOR_GC_CLEANUP,
+  SML_ALLOC_COLLECTOR_LOCK,
+  SML_ALLOC_COLLECTOR_WAIT,
+  SML_ALLOC_COLLECTOR_UNLOCK,
+  SML_ALLOC_COLLECTOR_DO_GC,
+  SML_ALLOC_COLLECTOR_LOCK2,
+  SML_ALLOC_COLLECTOR_BROADCAST,
+  SML_ALLOC_COLLECTOR_COUNT_VOTE,
+  SML_ALLOC_COLLECTOR_MOVE_PARTIAL_TO_FILLED,
+  SML_ALLOC_COLLECTOR_DO_GC2,
+  SML_ALLOC_COLLECTOR_LOCK3,
+  SML_ALLOC_COLLECTOR_BROADCAST2,
+  SML_ALLOC_COLLECTOR_COUNT_VOTE2,
   SML_ALLOC_LAST
 };
 
@@ -94,6 +106,18 @@ const char * sml_alloc_sym[SML_ALLOC_LAST] = {
   "WAIT_FOR_GC_COND_SIGNAL",
   "WAIT_FOR_GC_COND_WAIT",
   "WAIT_FOR_GC_CLEANUP",
+  "COLLECTOR_LOCK",
+  "COLLECTOR_WAIT",
+  "COLLECTOR_UNLOCK",
+  "COLLECTOR_DO_GC",
+  "COLLECTOR_LOCK2",
+  "COLLECTOR_BROADCAST",
+  "COLLECTOR_COUNT_VOTE",
+  "COLLECTOR_MOVE_PARTIAL_TO_FILLED",
+  "COLLECTOR_DO_GC2",
+  "COLLECTOR_LOCK3",
+  "COLLECTOR_BROADCAST2",
+  "COLLECTOR_COUNT_VOTE2",
 };
 
 static void sml_thread_idx_key_init(void) {
@@ -2406,47 +2430,63 @@ collector_main(void *arg ATTR_UNUSED)
 	struct collector_control * const cc = &collector_control;
 	unsigned int num_stalled;
 
+#if TAU_PROF
+	tsc_t t0 = get_tsc();
+#endif
 	mutex_lock(&cc->lock);
+#if TAU_PROF
+	tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_COLLECTOR_LOCK);
+#endif
  loop:
 	while (!(cc->mutators_stalled > 0
 		 || (load_relaxed(&collector.num_filled_total)
 		     >= collector.gc_threshold)
 		 || cc->exit))
-#if TAU_PROF
           {
+#if TAU_PROF
+	    tsc_t t2 = get_tsc();
+#endif
             cond_wait(&cc->cond_collector, &cc->lock);
-            if (0) {
-              printf("GC thread wake up"
-                     " mutators_stalled=%d"
-                     " num_filled_total=%d"
-                     " gc_threshold=%d\n", 
-                     cc->mutators_stalled,
-                     collector.num_filled_total,
-                     collector.gc_threshold);
-            }
+#if TAU_PROF
+	    tsc_t t3 = get_tsc();
+	    sml_record_alloc_time(0, t2, t3, SML_ALLOC_COLLECTOR_WAIT);
+#endif
           }
-#else
-          cond_wait(&cc->cond_collector, &cc->lock);
+#if TAU_PROF
+	tsc_t t4 = get_tsc();
 #endif
 	store_relaxed(&collector.num_request, cc->mutators_stalled);
 	mutex_unlock(&cc->lock);
+#if TAU_PROF
+	tsc_t t5 = get_tsc();
+	sml_record_alloc_time(0, t4, t5, SML_ALLOC_COLLECTOR_UNLOCK);
+#endif
 	if (cc->exit)
 		return NULL;
 
 #if TAU_PROF
-        //printf("do_gc begin\n");
-        tsc_t t0 = get_tsc();
+        tsc_t t6 = get_tsc();
 #endif
 	do_gc();
 #if TAU_PROF
-        tsc_t t1 = get_tsc();
-        //printf("do_gc end %lld\n", t1 - t0);
+        tsc_t t7 = get_tsc();
+	sml_record_alloc_time(0, t6, t7, SML_ALLOC_COLLECTOR_DO_GC);
+        tsc_t t8 = get_tsc();
 #endif
 	mutex_lock(&cc->lock);
 
 	cc->gc_count++;
+#if TAU_PROF
+        tsc_t t9 = get_tsc();
+	sml_record_alloc_time(0, t8, t9, SML_ALLOC_COLLECTOR_LOCK2);
+#endif
 	if (cc->mutators_stalled == 0) goto loop;
  retry:
+#if TAU_PROF
+	;
+        tsc_t t10 = get_tsc();
+#endif
 	/* Some mutators are being stalled due to lack of segments.
 	 * If at least one mutator is working, then the program continues. */
 	sml_debug("%u out of %u threads stalled\n",
@@ -2454,26 +2494,77 @@ collector_main(void *arg ATTR_UNUSED)
 	num_stalled = cc->mutators_stalled;
 	cc->mutators_stalled = 0;
 	cond_broadcast(&cc->cond_mutators);
-	if (count_vote(num_stalled)) goto loop;
+#if TAU_PROF
+        tsc_t t11 = get_tsc();
+	sml_record_alloc_time(0, t10, t11, SML_ALLOC_COLLECTOR_BROADCAST);
+        tsc_t t12 = get_tsc();
+#endif
+	if (count_vote(num_stalled)) {
+#if TAU_PROF
+          tsc_t t13 = get_tsc();
+	  sml_record_alloc_time(0, t12, t13, SML_ALLOC_COLLECTOR_COUNT_VOTE);
+#endif
+	  goto loop;
+	} else {
+#if TAU_PROF
+	  tsc_t t13 = get_tsc();
+	  sml_record_alloc_time(0, t12, t13, SML_ALLOC_COLLECTOR_COUNT_VOTE);
+#endif
+	}
 
 	/* All mutators voted for aborting the program and still stalled.
 	 * Try full GC and expect that it recovers the situation. */
+#if TAU_PROF
+	tsc_t t14 = get_tsc();
+#endif
 	sml_debug("full gc\n");
 #ifdef GCTIME
 	gctime.full_gc_count++;
 #endif /* GCTIME */
 	mutex_unlock(&cc->lock);
 	move_partial_to_filled();
+#if TAU_PROF
+	tsc_t t15 = get_tsc();
+	sml_record_alloc_time(0, t14, t15, SML_ALLOC_COLLECTOR_MOVE_PARTIAL_TO_FILLED);
+	tsc_t t16 = get_tsc();
+#endif
 	do_gc();
+#if TAU_PROF
+	tsc_t t17 = get_tsc();
+	sml_record_alloc_time(0, t16, t17, SML_ALLOC_COLLECTOR_DO_GC2);
+	tsc_t t18 = get_tsc();
+#endif
 	mutex_lock(&cc->lock);
-
 	cc->gc_count++;
 	sml_debug("%u out of %u threads still stalled\n",
 		  cc->mutators_stalled, cc->num_mutators);
+#if TAU_PROF
+	tsc_t t19 = get_tsc();
+	sml_record_alloc_time(0, t18, t19, SML_ALLOC_COLLECTOR_LOCK3);
+#endif
 	if (cc->mutators_stalled != num_stalled) goto retry;
+#if TAU_PROF
+	tsc_t t20 = get_tsc();
+#endif
 	cc->mutators_stalled = 0;
 	cond_broadcast(&cc->cond_mutators);
-	if (count_vote(num_stalled)) goto loop;
+#if TAU_PROF
+	tsc_t t21 = get_tsc();
+	sml_record_alloc_time(0, t20, t21, SML_ALLOC_COLLECTOR_BROADCAST2);
+	tsc_t t22 = get_tsc();
+#endif
+	if (count_vote(num_stalled)) {
+#if TAU_PROF
+	  tsc_t t23 = get_tsc();
+	  sml_record_alloc_time(0, t22, t23, SML_ALLOC_COLLECTOR_COUNT_VOTE2);
+#endif
+	  goto loop;
+	} else {
+#if TAU_PROF
+	  tsc_t t23 = get_tsc();
+	  sml_record_alloc_time(0, t22, t23, SML_ALLOC_COLLECTOR_COUNT_VOTE2);
+#endif
+	}
 
 	print_heap_summary();
 	sml_fatal(0, "heap exhausted; all threads stalled");
