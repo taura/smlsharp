@@ -56,6 +56,10 @@ enum {
   SML_ALLOC_INC_NUM_FILLED,
   SML_ALLOC_TRY_FIND_SEGMENT,
   SML_ALLOC_REQUEST_SEGMENT,
+  SML_ALLOC_REQUEST_SEGMENT_0,
+  SML_ALLOC_DO_GC,
+  SML_ALLOC_ENTER_INTERNAL,
+  SML_ALLOC_REQUEST_SEGMENT_TRY_FIND_SEGMENT,
   SML_ALLOC_LAST
 };
 
@@ -68,6 +72,9 @@ const char * sml_alloc_sym[SML_ALLOC_LAST] = {
   "INC_NUM_FILLED",
   "TRY_FIND_SEGMENT",
   "REQUEST_SEGMENT",
+  "DO_GC",
+  "ENTER_INTERNAL",
+  "REQUEST_SEGMENT_TRY_FIND_SEGMENT",
 };
 
 static void sml_thread_idx_key_init(void) {
@@ -2705,7 +2712,9 @@ request_segment(struct subheap *subheap, struct alloc_ptr *ptr,
 		unsigned int blocksize_log2, void *frame_pointer)
 {
 	void *old_top, *obj;
-
+#if TAU_PROF
+        tsc_t t0 = get_tsc();
+#endif
 	assert(1U << (subheap - &global_subheaps[0]) == ptr->blocksize_bytes);
 	assert(1U << blocksize_log2 == ptr->blocksize_bytes);
 
@@ -2713,15 +2722,32 @@ request_segment(struct subheap *subheap, struct alloc_ptr *ptr,
 	load_add_store_relaxed(&collector.num_request, 1);
 
 	old_top = sml_leave_internal(frame_pointer);
+#if TAU_PROF
+        tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_REQUEST_SEGMENT_0);
+        tsc_t t2 = get_tsc();
+#endif
 	do_gc();
+#if TAU_PROF
+        tsc_t t3 = get_tsc();
+	sml_record_alloc_time(0, t2, t3, SML_ALLOC_DO_GC);
+        tsc_t t4 = get_tsc();
+#endif
 	sml_enter_internal(old_top);
-
+#if TAU_PROF
+        tsc_t t5 = get_tsc();
+	sml_record_alloc_time(0, t4, t5, SML_ALLOC_ENTER_INTERNAL);
+        tsc_t t6 = get_tsc();
+#endif
 	obj = try_find_segment(subheap, ptr, blocksize_log2);
 	if (!obj) {
 		print_heap_summary();
 		sml_fatal(0, "heap exhausted; all threads stalled");
 	}
-
+#if TAU_PROF
+        tsc_t t7 = get_tsc();
+	sml_record_alloc_time(0, t6, t7, SML_ALLOC_REQUEST_SEGMENT_TRY_FIND_SEGMENT);
+#endif
 	return obj;
 }
 
