@@ -50,16 +50,19 @@ static volatile long sml_thread_idx_counter;
 enum {
   SML_ALLOC_MALLOC_OBJECT,
   SML_ALLOC_FAST,
-  SML_ALLOC_FINDBITMAP,
-  SML_ALLOC_FINDSEGMENT,
+  SML_ALLOC_FIND_BITMAP,
+  SML_ALLOC_FIND_SEGMENT,
   SML_ALLOC_FIND_SEGMENT_0,
   SML_ALLOC_INC_NUM_FILLED,
   SML_ALLOC_TRY_FIND_SEGMENT,
   SML_ALLOC_REQUEST_SEGMENT,
-  SML_ALLOC_REQUEST_SEGMENT_0,
-  SML_ALLOC_DO_GC,
-  SML_ALLOC_ENTER_INTERNAL,
+  SML_ALLOC_REQUEST_SEGMENT_LEAVE_INTERNAL,
+  SML_ALLOC_REQUEST_SEGMENT_WAIT_FOR_VOTE,
   SML_ALLOC_REQUEST_SEGMENT_TRY_FIND_SEGMENT,
+  SML_ALLOC_REQUEST_SEGMENT_VOTE_CONTINUE,
+  SML_ALLOC_REQUEST_SEGMENT_MOVE_ALL_TO_FILLED,
+  SML_ALLOC_REQUEST_SEGMENT_VOTE_ABORT,
+  SML_ALLOC_REQUEST_SEGMENT_ENTER_INTERNAL,
   SML_ALLOC_LAST
 };
 
@@ -72,9 +75,13 @@ const char * sml_alloc_sym[SML_ALLOC_LAST] = {
   "INC_NUM_FILLED",
   "TRY_FIND_SEGMENT",
   "REQUEST_SEGMENT",
-  "DO_GC",
-  "ENTER_INTERNAL",
+  "REQUEST_SEGMENT_LEAVE_INTERNAL",
+  "REQUEST_SEGMENT_WAIT_FOR_VOTE",
   "REQUEST_SEGMENT_TRY_FIND_SEGMENT",
+  "REQUEST_SEGMENT_VOTE_CONTINUE",
+  "REQUEST_SEGMENT_MOVE_ALL_TO_FILLED",
+  "REQUEST_SEGMENT_VOTE_ABORT",
+  "REQUEST_SEGMENT_ENTER_INTERNAL",
 };
 
 static void sml_thread_idx_key_init(void) {
@@ -2712,9 +2719,6 @@ request_segment(struct subheap *subheap, struct alloc_ptr *ptr,
 		unsigned int blocksize_log2, void *frame_pointer)
 {
 	void *old_top, *obj;
-#if TAU_PROF
-        tsc_t t0 = get_tsc();
-#endif
 	assert(1U << (subheap - &global_subheaps[0]) == ptr->blocksize_bytes);
 	assert(1U << blocksize_log2 == ptr->blocksize_bytes);
 
@@ -2722,32 +2726,13 @@ request_segment(struct subheap *subheap, struct alloc_ptr *ptr,
 	load_add_store_relaxed(&collector.num_request, 1);
 
 	old_top = sml_leave_internal(frame_pointer);
-#if TAU_PROF
-        tsc_t t1 = get_tsc();
-	sml_record_alloc_time(0, t0, t1, SML_ALLOC_REQUEST_SEGMENT_0);
-        tsc_t t2 = get_tsc();
-#endif
 	do_gc();
-#if TAU_PROF
-        tsc_t t3 = get_tsc();
-	sml_record_alloc_time(0, t2, t3, SML_ALLOC_DO_GC);
-        tsc_t t4 = get_tsc();
-#endif
 	sml_enter_internal(old_top);
-#if TAU_PROF
-        tsc_t t5 = get_tsc();
-	sml_record_alloc_time(0, t4, t5, SML_ALLOC_ENTER_INTERNAL);
-        tsc_t t6 = get_tsc();
-#endif
 	obj = try_find_segment(subheap, ptr, blocksize_log2);
 	if (!obj) {
 		print_heap_summary();
 		sml_fatal(0, "heap exhausted; all threads stalled");
 	}
-#if TAU_PROF
-        tsc_t t7 = get_tsc();
-	sml_record_alloc_time(0, t6, t7, SML_ALLOC_REQUEST_SEGMENT_TRY_FIND_SEGMENT);
-#endif
 	return obj;
 }
 
@@ -2795,7 +2780,9 @@ request_segment(struct subheap *subheap, struct alloc_ptr *ptr,
 {
 	void *obj, *old_top;
 	unsigned int gc_count;
-
+#if TAU_PROF
+        tsc_t t0 = get_tsc();
+#endif
 	assert(1U << (subheap - &global_subheaps[0]) == ptr->blocksize_bytes);
 	assert(1U << blocksize_log2 == ptr->blocksize_bytes);
 
@@ -2803,18 +2790,60 @@ request_segment(struct subheap *subheap, struct alloc_ptr *ptr,
 	old_top = sml_leave_internal(frame_pointer);
 	sml_debug("no block found in subheap %u\n", blocksize_log2);
 	fetch_add(relaxed, &collector.num_request, 1);
+#if TAU_PROF
+        tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_REQUEST_SEGMENT_LEAVE_INTERNAL);
+        tsc_t t2 = get_tsc();
+#endif
 	gc_count = wait_for_vote();
+#if TAU_PROF
+        tsc_t t3 = get_tsc();
+	sml_record_alloc_time(0, t2, t3, SML_ALLOC_REQUEST_SEGMENT_WAIT_FOR_VOTE);
+#endif
 	for (;;) {
-		obj = try_find_segment(subheap, ptr, blocksize_log2);
-		if (obj) {
-			vote_continue(gc_count);
-			break;
-		}
-		/* release all segments owned by this thread for full GC */
-		move_all_to_filled(worker_tlv_get(alloc_ptr_set));
-		gc_count = vote_abort(gc_count);
+#if TAU_PROF
+	  tsc_t t4 = get_tsc();
+#endif
+	  obj = try_find_segment(subheap, ptr, blocksize_log2);
+#if TAU_PROF
+	  tsc_t t5 = get_tsc();
+	  sml_record_alloc_time(0, t4, t5, SML_ALLOC_REQUEST_SEGMENT_TRY_FIND_SEGMENT);
+#endif
+	  if (obj) {
+#if TAU_PROF
+	    tsc_t t6 = get_tsc();
+#endif
+	    vote_continue(gc_count);
+#if TAU_PROF
+	    tsc_t t7 = get_tsc();
+	    sml_record_alloc_time(0, t6, t7, SML_ALLOC_REQUEST_SEGMENT_VOTE_CONTINUE);
+#endif
+	    break;
+	  }
+	  /* release all segments owned by this thread for full GC */
+#if TAU_PROF
+	  tsc_t t8 = get_tsc();
+#endif
+	  move_all_to_filled(worker_tlv_get(alloc_ptr_set));
+#if TAU_PROF
+	  tsc_t t9 = get_tsc();
+	  sml_record_alloc_time(0, t8, t9, SML_ALLOC_REQUEST_SEGMENT_MOVE_ALL_TO_FILLED);
+	  tsc_t t10 = get_tsc();
+#endif
+	  gc_count = vote_abort(gc_count);
+#if TAU_PROF
+	  tsc_t t11 = get_tsc();
+	  sml_record_alloc_time(0, t10, t11, SML_ALLOC_REQUEST_SEGMENT_VOTE_ABORT);
+#endif
 	}
+#if TAU_PROF
+	tsc_t t12 = get_tsc();
+#endif
 	sml_enter_internal(old_top);
+#if TAU_PROF
+	tsc_t t13 = get_tsc();
+	sml_record_alloc_time(0, t12, t13, SML_ALLOC_REQUEST_SEGMENT_ENTER_INTERNAL);
+#endif
 
 	assert(obj != NULL);
 	return obj;
@@ -2988,13 +3017,13 @@ sml_alloc_internal(unsigned int objsize, void * frame_pointer)
 	obj = find_bitmap(ptr);
 	if (obj) {
           tsc_t t1 = get_tsc();
-          sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_FINDBITMAP);
+          sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_FIND_BITMAP);
           goto alloced;
         }
 
 	obj = find_segment(ptr, frame_pointer);
         tsc_t t1 = get_tsc();
-        sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_FINDSEGMENT);
+        sml_record_alloc_time(objsize, t0, t1, SML_ALLOC_FIND_SEGMENT);
 alloced:
 	assert(check_filled(OBJ_BEGIN(obj), 0x55, objsize));
 	return obj;
