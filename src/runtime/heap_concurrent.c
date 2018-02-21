@@ -63,6 +63,12 @@ enum {
   SML_ALLOC_REQUEST_SEGMENT_MOVE_ALL_TO_FILLED,
   SML_ALLOC_REQUEST_SEGMENT_VOTE_ABORT,
   SML_ALLOC_REQUEST_SEGMENT_ENTER_INTERNAL,
+  SML_ALLOC_WAIT_FOR_VOTE_LOCK,
+  SML_ALLOC_WAIT_FOR_VOTE_WAIT_FOR_GC,
+  SML_ALLOC_WAIT_FOR_VOTE_UNLOCK,
+  SML_ALLOC_WAIT_FOR_GC_COND_SIGNAL,
+  SML_ALLOC_WAIT_FOR_GC_COND_WAIT,
+  SML_ALLOC_WAIT_FOR_GC_CLEANUP,
   SML_ALLOC_LAST
 };
 
@@ -82,6 +88,12 @@ const char * sml_alloc_sym[SML_ALLOC_LAST] = {
   "REQUEST_SEGMENT_MOVE_ALL_TO_FILLED",
   "REQUEST_SEGMENT_VOTE_ABORT",
   "REQUEST_SEGMENT_ENTER_INTERNAL",
+  "WAIT_FOR_VOTE_LOCK",
+  "WAIT_FOR_VOTE_WAIT_FOR_GC",
+  "WAIT_FOR_VOTE_UNLOCK",
+  "WAIT_FOR_GC_COND_SIGNAL",
+  "WAIT_FOR_GC_COND_WAIT",
+  "WAIT_FOR_GC_CLEANUP",
 };
 
 static void sml_thread_idx_key_init(void) {
@@ -2271,20 +2283,10 @@ struct collector_control {
 static void
 inc_num_filled_total()
 {
-#if 0 && TAU_PROF
-	mutex_lock(&collector_control.lock);
-        unsigned int nfd = collector.num_filled_total;
-        collector.num_filled_total = nfd + 1;
-        if (nfd >= collector.gc_threshold) {
-          cond_signal(&collector_control.cond_collector);
-        }
-	mutex_unlock(&collector_control.lock);
-#else
 	fetch_add(relaxed, &collector.num_filled_total, 1);
 	mutex_lock(&collector_control.lock);
 	cond_signal(&collector_control.cond_collector);
 	mutex_unlock(&collector_control.lock);
-#endif
 }
 
 static void
@@ -2303,14 +2305,29 @@ cleanup_wait_for_gc(void *arg)
 static unsigned int
 wait_for_gc()
 {
+#if TAU_PROF
+        tsc_t t0 = get_tsc();
+#endif
 	uintptr_t gc_count;
 	collector_control.mutators_stalled++;
 	cond_signal(&collector_control.cond_collector);
 	gc_count = collector_control.gc_count;
 	pthread_cleanup_push(cleanup_wait_for_gc, (void*)gc_count);
-	while (!(collector_control.gc_count != gc_count))
-		cond_wait(&collector_control.cond_mutators,
-			  &collector_control.lock);
+#if TAU_PROF
+        tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_WAIT_FOR_GC_COND_SIGNAL);
+#endif
+	while (!(collector_control.gc_count != gc_count)) {
+#if TAU_PROF
+	  tsc_t t2 = get_tsc();
+#endif
+	  cond_wait(&collector_control.cond_mutators,
+		    &collector_control.lock);
+#if TAU_PROF
+	  tsc_t t3 = get_tsc();
+	  sml_record_alloc_time(0, t2, t3, SML_ALLOC_WAIT_FOR_GC_COND_WAIT);
+#endif
+	}
 	pthread_cleanup_pop(0);
 	return gc_count + 1;
 }
@@ -2319,9 +2336,26 @@ static unsigned int
 wait_for_vote()
 {
 	unsigned int gc_count;
+#if TAU_PROF
+        tsc_t t0 = get_tsc();
+#endif
 	mutex_lock(&collector_control.lock);
+#if TAU_PROF
+        tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_WAIT_FOR_VOTE_LOCK);
+        tsc_t t2 = get_tsc();
+#endif
 	gc_count = wait_for_gc();
+#if TAU_PROF
+        tsc_t t3 = get_tsc();
+	sml_record_alloc_time(0, t2, t3, SML_ALLOC_WAIT_FOR_VOTE_WAIT_FOR_GC);
+        tsc_t t4 = get_tsc();
+#endif
 	mutex_unlock(&collector_control.lock);
+#if TAU_PROF
+        tsc_t t5 = get_tsc();
+	sml_record_alloc_time(0, t4, t5, SML_ALLOC_WAIT_FOR_VOTE_UNLOCK);
+#endif
 	return gc_count;
 }
 
