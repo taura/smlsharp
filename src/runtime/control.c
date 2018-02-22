@@ -3,10 +3,18 @@
  * @copyright (c) 2007-2014, Tohoku University.
  * @author UENO Katsuhiro
  */
+#if TAU_PROF
+#undef NDEBUG
+#include <assert.h>
+#endif
 
 #include "smlsharp.h"
 #include <stdlib.h>
 #include "heap.h"
+
+#if TAU_PROF
+#include "tau_prof.h"
+#endif
 
 #ifndef WITHOUT_MULTITHREAD
 struct control {
@@ -970,10 +978,18 @@ void
 sml_gc()
 {
 	struct control *current_workers;
+#if TAU_PROF
+        tsc_t t0 = get_tsc();
+#endif
 	control_gc();
 
 	assert(load_relaxed(&sync_counter) == 0);
 
+#if TAU_PROF
+        tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_GC_CONTROL_GC);
+        tsc_t t2 = get_tsc();
+#endif
 	/* SYNC1: turn on snooping and snapshot barriers */
 
 	/* all new worker threads must be in SYNC1. */
@@ -986,6 +1002,11 @@ sml_gc()
 
 	sync1(current_workers);
 
+#if TAU_PROF
+        tsc_t t3 = get_tsc();
+	sml_record_alloc_time(0, t2, t3, SML_ALLOC_GC_SYNC1);
+        tsc_t t4 = get_tsc();
+#endif
 	/* SYNC2: rootset & allocation pointer snapshot */
 
 	/* all new worker threads must be in SYNC2. */
@@ -1002,6 +1023,11 @@ sml_gc()
 	change_phase(current_workers, SYNC1, PRESYNC2);
 
 	sync2(current_workers);
+#if TAU_PROF
+        tsc_t t5 = get_tsc();
+	sml_record_alloc_time(0, t4, t5, SML_ALLOC_GC_SYNC2);
+        tsc_t t6 = get_tsc();
+#endif
 
 	/* MARK: turn off snooping barrier */
 
@@ -1014,6 +1040,11 @@ sml_gc()
 	change_phase(current_workers, SYNC2, MARK);
 
 	sml_heap_collector_mark();
+#if TAU_PROF
+        tsc_t t7 = get_tsc();
+	sml_record_alloc_time(0, t6, t7, SML_ALLOC_GC_MARK);
+        tsc_t t8 = get_tsc();
+#endif
 
 	/* ASYNC: turn off snapshot barrier */
 	spin_lock(&worker_creation_lock);
@@ -1022,9 +1053,24 @@ sml_gc()
 	spin_unlock(&worker_creation_lock);
 
 	change_phase(current_workers, MARK, ASYNC);
+#if TAU_PROF
+        tsc_t t9 = get_tsc();
+	sml_record_alloc_time(0, t8, t9, SML_ALLOC_GC_ASYNC);
+        tsc_t t10 = get_tsc();
+#endif
 
 	sml_run_finalizer();
+#if TAU_PROF
+        tsc_t t11 = get_tsc();
+	sml_record_alloc_time(0, t10, t11, SML_ALLOC_GC_FINALIZER);
+        tsc_t t12 = get_tsc();
+#endif
+
 	sml_heap_collector_async();
+#if TAU_PROF
+        tsc_t t13 = get_tsc();
+	sml_record_alloc_time(0, t12, t13, SML_ALLOC_GC_COLLECTOR_ASYNC);
+#endif
 }
 
 #endif /* !WITHOUT_MULTITHREAD && !WITHOUT_CONCURRENCY */

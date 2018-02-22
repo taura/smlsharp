@@ -29,60 +29,13 @@
 #include <assert.h>
 #include <stdio.h>
 #include <pthread.h>
-#include <x86intrin.h>
-typedef long long tsc_t;
 
-tsc_t get_ns() {
-  struct timespec ts[1];
-  clock_gettime(CLOCK_REALTIME, ts);
-  return ts->tv_sec * 1000000000 + ts->tv_nsec;
-}
-
-SML_PRIMITIVE tsc_t get_tsc() {
-  return _rdtsc();
-}
+#include "tau_prof.h"
 
 static pthread_once_t sml_thread_idx_key_ctl = PTHREAD_ONCE_INIT;
 static pthread_key_t sml_thread_idx_key = -1;
 static pthread_key_t sml_alloc_time_record_key = -1;
 static volatile long sml_thread_idx_counter;
-
-enum {
-  SML_ALLOC_MALLOC_OBJECT,
-  SML_ALLOC_FAST,
-  SML_ALLOC_FIND_BITMAP,
-  SML_ALLOC_FIND_SEGMENT,
-  SML_ALLOC_FIND_SEGMENT_0,
-  SML_ALLOC_INC_NUM_FILLED,
-  SML_ALLOC_TRY_FIND_SEGMENT,
-  SML_ALLOC_REQUEST_SEGMENT,
-  SML_ALLOC_REQUEST_SEGMENT_LEAVE_INTERNAL,
-  SML_ALLOC_REQUEST_SEGMENT_WAIT_FOR_VOTE,
-  SML_ALLOC_REQUEST_SEGMENT_TRY_FIND_SEGMENT,
-  SML_ALLOC_REQUEST_SEGMENT_VOTE_CONTINUE,
-  SML_ALLOC_REQUEST_SEGMENT_MOVE_ALL_TO_FILLED,
-  SML_ALLOC_REQUEST_SEGMENT_VOTE_ABORT,
-  SML_ALLOC_REQUEST_SEGMENT_ENTER_INTERNAL,
-  SML_ALLOC_WAIT_FOR_VOTE_LOCK,
-  SML_ALLOC_WAIT_FOR_VOTE_WAIT_FOR_GC,
-  SML_ALLOC_WAIT_FOR_VOTE_UNLOCK,
-  SML_ALLOC_WAIT_FOR_GC_COND_SIGNAL,
-  SML_ALLOC_WAIT_FOR_GC_COND_WAIT,
-  SML_ALLOC_WAIT_FOR_GC_CLEANUP,
-  SML_ALLOC_COLLECTOR_LOCK,
-  SML_ALLOC_COLLECTOR_WAIT,
-  SML_ALLOC_COLLECTOR_UNLOCK,
-  SML_ALLOC_COLLECTOR_DO_GC,
-  SML_ALLOC_COLLECTOR_LOCK2,
-  SML_ALLOC_COLLECTOR_BROADCAST,
-  SML_ALLOC_COLLECTOR_COUNT_VOTE,
-  SML_ALLOC_COLLECTOR_MOVE_PARTIAL_TO_FILLED,
-  SML_ALLOC_COLLECTOR_DO_GC2,
-  SML_ALLOC_COLLECTOR_LOCK3,
-  SML_ALLOC_COLLECTOR_BROADCAST2,
-  SML_ALLOC_COLLECTOR_COUNT_VOTE2,
-  SML_ALLOC_LAST
-};
 
 const char * sml_alloc_sym[SML_ALLOC_LAST] = {
   "MALLOC_OBJECT",
@@ -118,6 +71,13 @@ const char * sml_alloc_sym[SML_ALLOC_LAST] = {
   "COLLECTOR_LOCK3",
   "COLLECTOR_BROADCAST2",
   "COLLECTOR_COUNT_VOTE2",
+  "GC_CONTROL_GC",
+  "GC_SYNC1",
+  "GC_SYNC2",
+  "GC_MARK",
+  "GC_ASYNC",
+  "GC_FINALIZER",
+  "GC_COLLECTOR_ASYNC",
 };
 
 static void sml_thread_idx_key_init(void) {
@@ -273,8 +233,7 @@ static sml_alloc_time_recorder_t * sml_alloc_time_getspecific(void) {
   return r;
 }
 
-static void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1,
-                                  long evt_idx) {
+void sml_record_alloc_time(unsigned int sz, tsc_t t0, tsc_t t1, long evt_idx) {
   sml_alloc_time_recorder_t * r = sml_alloc_time_getspecific();
   sml_alloc_time_recorder_record(r, r->idx, sz, t0, t1, evt_idx);
 }
