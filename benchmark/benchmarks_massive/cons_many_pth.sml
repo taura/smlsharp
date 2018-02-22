@@ -43,16 +43,16 @@ fun make_tasks n 0 = _NULL
 
 val sml_dump_alloc_time = _import "sml_dump_alloc_time" : () -> ()
 val sml_reset_alloc_time = _import "sml_reset_alloc_time" : () -> ()
-val get_tsc = _import "get_tsc" : () -> int64
+val sml_get_tsc = _import "sml_get_tsc" : () -> int64
 
 (* measure rep times "make m tasks each making n cons cells" *)
 fun do_it n m 0 = 0
   | do_it n m rep = 
     let
 	val _ = sml_reset_alloc_time ()
-	val t0 = get_tsc() (* Time.now () *)
+	val t0 = sml_get_tsc() (* Time.now () *)
 	val x = make_tasks n m
-	val t1 = get_tsc() (* Time.now () *)
+	val t1 = sml_get_tsc() (* Time.now () *)
 	(* val _ = (print (Time.fmt 6 (Time.- (t1, t0))); print "\n") *)
 	val _ = (print (Int64.toString (t1 - t0)); print "\n")
     in

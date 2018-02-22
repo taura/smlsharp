@@ -78,7 +78,15 @@ const char * sml_alloc_sym[SML_ALLOC_LAST] = {
   "GC_ASYNC",
   "GC_FINALIZER",
   "GC_COLLECTOR_ASYNC",
+  "GC_SEPARATE_SEGMENTS",
+  "GC_REBALANCE_SUBHEAPS",
+  "GC_RECLAIM_SEGMENTS",
 };
+
+SML_PRIMITIVE tsc_t sml_get_tsc() {
+  return get_tsc();
+}
+
 
 static void sml_thread_idx_key_init(void) {
   int r0 = pthread_key_create(&sml_thread_idx_key, 0);
@@ -2164,15 +2172,32 @@ sml_heap_check_alive(void **slot)
 void
 sml_heap_collector_async()
 {
+#if TAU_PROF
+        tsc_t t0 = get_tsc();
+#endif
 	struct reclaim r;
 	separate_segments(&collector.collect_set, &r);
+#if TAU_PROF
+        tsc_t t1 = get_tsc();
+	sml_record_alloc_time(0, t0, t1, SML_ALLOC_GC_SEPARATE_SEGMENTS);
+        tsc_t t2 = get_tsc();
+#endif
 	rebalance_subheaps(&r, load_relaxed(&collector.num_request));
+#if TAU_PROF
+        tsc_t t3 = get_tsc();
+	sml_record_alloc_time(0, t2, t3, SML_ALLOC_GC_REBALANCE_SUBHEAPS);
+        tsc_t t4 = get_tsc();
+#endif
 	reclaim_segments(&r);
 #if !defined WITHOUT_MULTITHREAD && !defined WITHOUT_CONCURRENCY
 	fetch_add(relaxed, &collector.num_filled_total, r.num_filled);
 	collector.gc_threshold =
 		(segment_pool.heap.num_committed + r.num_filled) / 2;
 #endif /* !WITHOUT_MULTITHREAD && !defined WITHOUT_CONCURRENCY */
+#if TAU_PROF
+        tsc_t t5 = get_tsc();
+	sml_record_alloc_time(0, t4, t5, SML_ALLOC_GC_RECLAIM_SEGMENTS);
+#endif
 }
 
 static void
